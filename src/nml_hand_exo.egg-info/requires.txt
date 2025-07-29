@@ -1,0 +1,14 @@
+numpy
+pyserial
+pyyaml
+PyQt5
+pyqtgraph
+
+[docs]
+sphinx
+sphinx-autodoc-typehints
+myst-parser
+breathe
+sphinx-copybutton
+m2r2
+sphinx_rtd_theme

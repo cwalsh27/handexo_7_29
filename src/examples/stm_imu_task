@@ -1,0 +1,187 @@
+import numpy as np
+import pylsl
+from pylsl import StreamInlet
+import time
+from scipy.signal import butter, lfilter, lfilter_zi, iirnotch, filtfilt
+import serial
+import csv
+import threading
+import random
+
+from nml_hand_exo import HandExo, SerialComm
+
+############### PARAMETERS ############### 
+sampling_rate = 2000  # Hz
+PORT = 'COM3'
+BAUD_RATE = 57600
+motorID = 0
+
+stream_name_1 = 'FLX'
+stream_name_2 = 'EXT'
+
+encoding_round_count = 3
+trial_count = 60  # MUST BE MULTIPLE OF 6
+
+shared_imu_data = {"yaw": 0.0, "pitch": 0.0, "roll": 0.0}
+imu_lock = threading.Lock()
+imu_update_enabled = threading.Event()
+imu_update_enabled.set()
+
+############### Connect to LSL Stream ############### 
+print("Resolving LSL stream...")
+streams = pylsl.resolve_streams()
+
+inlet1 = None
+inlet2 = None
+j = 0
+for i, stream in enumerate(streams):
+    print('STREAM NAME: ', stream.name())
+    if stream.name() == stream_name_1:
+        print(f"Found stream {i+1}: {stream.name()} (Type: {stream.type()})")
+        inlet1 = StreamInlet(stream, max_buflen=60)
+        j += 1
+    if stream.name() == stream_name_2:
+        print(f"Found stream {i+1}: {stream.name()} (Type: {stream.type()})")
+        inlet2 = StreamInlet(stream, max_buflen=60)
+        j += 1
+    if j >= 2:
+        break
+
+############### Connect to Exo ############### 
+comm = SerialComm(port=PORT, baudrate=BAUD_RATE)
+exo = HandExo(comm, verbose=False)
+exo.connect()
+print('Exo connected')
+
+exo.reboot_motor(motorID)
+exo.disable_motor(motorID)
+time.sleep(1)
+exo.enable_led(motorID)
+exo.disable_led(motorID)
+time.sleep(1)
+print("Exo configured")
+
+############### IMU Management Thread ############### 
+def imu_manager():
+    while not stop_event.is_set():
+        if imu_update_enabled.is_set():
+            rpy = exo.get_imu_angles()
+            if rpy is not None:
+                with imu_lock:
+                    shared_imu_data.update(rpy)
+        time.sleep(0.05)
+
+def get_latest_imu_angle():
+    with imu_lock:
+        return shared_imu_data.copy()
+
+############### Gradual IMU-Based Motion ############### 
+def gradual_motion_to_wrist_angle(motorID, target_wrist_angle):
+    """
+    Moves the motor gradually until IMU yaw reaches target_wrist_angle.
+    """
+    step_motor_angle = 0.5  # degrees per step (motor space)
+    max_attempts = 200
+    exo.enable_motor(motor_id=motorID)
+    
+    attempts = 0
+    while attempts < max_attempts:
+        current_wrist_angle = get_latest_imu_angle()["yaw"]
+        print(f"Current wrist angle: {current_wrist_angle:.2f}, Target: {target_wrist_angle:.2f}")
+        if abs(current_wrist_angle - target_wrist_angle) < 0.5:  # close enough
+            break
+        # Increment motor to keep moving toward target
+        current_motor_angle = exo.get_motor_angle(motor_id=motorID)
+        direction = np.sign(target_wrist_angle - current_wrist_angle)
+        next_motor_angle = current_motor_angle + direction * step_motor_angle
+        exo.set_motor_angle(motor_id=motorID, angle=next_motor_angle)
+        time.sleep(0.05)
+        attempts += 1
+
+############### Main Control Structure ############### 
+def control_structure():
+    '''Calibration Stage'''
+    exo.reboot_motor(motor_id=motorID)
+
+    input("Place wrist in a relaxed position. Press Enter to record resting wrist angle.")
+    imu_update_enabled.clear()
+    time.sleep(0.1)
+    rest_wrist_angle = get_latest_imu_angle()["yaw"]
+    imu_update_enabled.set()
+    print(f"Rest wrist angle: {rest_wrist_angle:.2f}")
+
+    input("Move wrist to max flexion. Press Enter to record.")
+    max_flexion_wrist_angle = get_latest_imu_angle()["yaw"]
+    print(f"Max flexion wrist angle: {max_flexion_wrist_angle:.2f}")
+
+    memory_range = abs(max_flexion_wrist_angle - rest_wrist_angle)
+    memory_angleA = rest_wrist_angle + (memory_range * 0.31)
+    memory_angleB = rest_wrist_angle + (memory_range * 0.62)
+    memory_angleC = rest_wrist_angle + (memory_range * 0.89)
+
+    fake_memory_multipliers = [0.14, 0.09, 0.46, 0.42, 0.7, 0.99]
+    fake_memory_angles = [rest_wrist_angle - (memory_range * m) for m in fake_memory_multipliers]
+
+    print(f"Memory Angles: A={memory_angleA:.2f}, B={memory_angleB:.2f}, C={memory_angleC:.2f}")
+
+    '''Encoding of Memory Angles'''
+    input(f"Prepare for memory encoding ({encoding_round_count} repetitions). Press Enter.")
+    for _ in range(encoding_round_count):
+        for angle, label in zip([memory_angleA, memory_angleB, memory_angleC], ['A', 'B', 'C']):
+            print(f"Encoding Angle {label}")
+            gradual_motion_to_wrist_angle(motorID, angle)
+            time.sleep(2)
+            gradual_motion_to_wrist_angle(motorID, rest_wrist_angle)
+            time.sleep(1)
+
+    '''Test Angle Trials'''
+    input(f"Prepare for test trials ({trial_count} total). Press Enter.")
+
+    reps_per_angle = trial_count // 6
+    trial_sequence = ['A'] * reps_per_angle + ['B'] * reps_per_angle + ['C'] * reps_per_angle + ['D'] * (reps_per_angle * 3)
+    random.shuffle(trial_sequence)
+
+    hits_and_misses = []
+    answers = {"A": 0, "B": 0, "C": 0, "D": 0}
+
+    for trial in trial_sequence:
+        print(f"Presenting trial: {trial}")
+        if trial in ['A', 'B', 'C']:
+            target_angle = {"A": memory_angleA, "B": memory_angleB, "C": memory_angleC}[trial]
+        else:
+            target_angle = random.choice(fake_memory_angles)
+        
+        gradual_motion_to_wrist_angle(motorID, target_angle)
+        time.sleep(2)
+        gradual_motion_to_wrist_angle(motorID, rest_wrist_angle)
+        time.sleep(1)
+
+        guess = input("Which angle was it? Enter A/B/C/D: ").upper()
+        if guess == 'Z':
+            print("Early termination.")
+            break
+        correct = (guess == trial)
+        hits_and_misses.append((trial, int(correct)))
+        answers[guess] += 1
+
+    with open(f"stmGuesses_{filename_timestamp}.txt", 'w') as f:
+        f.write(" ".join(map(str, hits_and_misses)))
+        f.write("\nAnswer Counts:\n")
+        f.write(str(answers))
+
+    stop_event.set()
+
+############### Main Thread Manager ############### 
+if __name__ == "__main__":
+    filename_timestamp = int(time.time())
+    stop_event = threading.Event()
+
+    t_imu = threading.Thread(target=imu_manager)
+    t_control = threading.Thread(target=control_structure)
+
+    t_imu.start()
+    t_control.start()
+
+    t_imu.join()
+    t_control.join()
+    print("End of program.")

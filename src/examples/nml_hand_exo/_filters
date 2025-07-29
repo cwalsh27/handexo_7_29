@@ -1,0 +1,52 @@
+import time
+import numpy as np
+
+
+class OrientationFilter:
+    def __init__(self, alpha=0.98):
+        self.alpha = alpha
+        self.last_time = None
+        self.roll = 0.0
+        self.pitch = 0.0
+        self.yaw = 0.0
+
+    def update(self, accel, gyro, current_time=None):
+        """
+        Updates orientation using accelerometer and gyroscope data.
+
+        Args:
+            accel: List or tuple of 3 floats (ax, ay, az) in m/s^2.
+            gyro: List or tuple of 3 floats (gx, gy, gz) in rad/s.
+            current_time: (Optional) float timestamp. If None, uses time.monotonic().
+        Returns:
+            dict with keys: 'roll', 'pitch', 'yaw' (all in degrees).
+        """
+        ax, ay, az = accel
+        gx, gy, gz = gyro
+        now = current_time or time.monotonic()
+
+        if self.last_time is None:
+            self.last_time = now
+            return {'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0}
+
+        dt = now - self.last_time
+        self.last_time = now
+
+        # Accelerometer-based roll/pitch estimate
+        accel_roll = np.arctan2(ay, az)
+        accel_pitch = np.arctan2(-ax, np.sqrt(ay**2 + az**2))
+
+        # Gyro integration
+        self.roll += gx * dt
+        self.pitch += gy * dt
+        self.yaw += gz * dt
+
+        # Complementary filter fusion
+        self.roll = self.alpha * self.roll + (1 - self.alpha) * accel_roll
+        self.pitch = self.alpha * self.pitch + (1 - self.alpha) * accel_pitch
+
+        return {
+            'roll': float(np.degrees(self.roll)),
+            'pitch': float(np.degrees(self.pitch)),
+            'yaw': float(np.degrees(self.yaw))
+        }
