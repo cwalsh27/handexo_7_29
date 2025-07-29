@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the following metadata."
+title: "NML Hand Exoskeleton"
+authors:
+  - family-names: Shulgach
+    given-names: Jonathan
+    affiliation: Carnegie Mellon University
+    orcid: https://orcid.org/0009-0004-0449-9918
+  - family-names: Kacker
+    given-names: Kriti
+    affiliation: Carnegie Mellon University
+date-released: "2025-05-31"
+version: "0.0.2"
+license: MIT
+repository-code: https://github.com/Neuro-Mechatronics-Interfaces/NML_Hand_Exo
